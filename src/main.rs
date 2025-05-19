@@ -1,9 +1,29 @@
-use axum::{routing::{get, post}, Router, extract::{Path, ConnectInfo, State}, response::{IntoResponse, Html, Redirect}};
+use axum::{
+    routing::{get, post}, Router, extract::{Path, ConnectInfo, State},body::{Body}, response::{IntoResponse, Response, Redirect}, http::{ StatusCode}};
 use std::{
+    env,
     sync::Arc,
     net::SocketAddr
 };
+use lazy_static::lazy_static;
 use tokio::sync::RwLock;
+use tera::Tera;
+
+lazy_static! {
+    pub static ref TEMPLATES: Tera = {
+        let source = "src/templates/**/*.html";
+        match Tera::new(source) {
+            Ok(t) => {
+                println!("Source template compiled correctly");
+                t
+            },
+            Err(e) => {
+                println!("Parsing error(s) encountered: {}", e);
+                ::std::process::exit(1);
+            }
+        }
+    };
+}
 
 struct User {
     id: i32,
@@ -38,8 +58,16 @@ async fn main() {
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 }
 
-async fn root(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Html<String> {
-    format!("<h1>Hello, World!</h1><h2> You are connecting from: {}</h2>", addr).into()
+async fn root(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Response {
+    let context = tera::Context::new();
+    let cwd = env::current_dir().unwrap();
+    println!("Current working dir: {}", cwd.display());
+    let page = TEMPLATES.render("index.html", &context).unwrap();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/html")
+        .body(Body::from(page))
+        .unwrap()
 }
 
 // async fn get_foo(State(state): State<Arc<AppState>>) -> Html<String> {

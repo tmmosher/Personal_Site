@@ -7,3 +7,5 @@ edition = "2024"
 
 tokio = { version = "1.45.0", features = ["macros", "rt-multi-thread"] }
 axum = "0.8.4"
+tera = "1.20.0"
+lazy_static = "1.5.0"
