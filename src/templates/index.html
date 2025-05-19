@@ -1,6 +1,50 @@
 {% extends 'layout.html' %}
 {% block content %}
 
-<h2> This is the example content block!</h2>
+<h2>Overview</h2>
+<p>Hello! I'm Trenton, a 2025 Software Engineering graduate from Arizona State University. My primary experience is in
+    full-stack web development with SolidJS/SolidStart and building RESTful API's.
+    Through the course of my degree, I became comfortable with several programming languages, including Java, C/C++,
+    Python, vanilla JavaScript and various JS frameworks. I have learned Rust and Lua on my own time for personal projects,
+    such as this website! This site was built using Rust's Axum framework with Tera as the templating engine. The code for it is
+    available on my <a href="https://github.com/tmmosher">GitHub</a>.
+    My short-term goals post-graduation are to take Allen-Bradley courses for PLC programming to work in controls engineering.</p>
+<h2>Experience</h2>
+<h3>Career</h3>
+<ul>
+    <li>
+        <strong>Software Engineer</strong>
+        <p>Full-stack software engineer with the Food Trucks Association of Canada for the fulfillment of ASU's Senior Capstone. Primary
+         responsibilities included auth flow management, UI/UX design, and performance improvement.</p>
+        <p>9/24 - 5/25</p>
+    </li>
+    <li>
+        <strong>Pharmacy Technician</strong>
+        <p>Pharmacy Technician with CVS Pharmacy.</p>
+        <p>3/22 - Present</p>
+    </li>
+</ul>
+<h3>Technical</h3>
+<p>A non-exhaustive academic and personal list of projects and skills.</p>
+<ul>
+    <li>
+        <strong>Java</strong>
+        <p>RESTful API's and MVC with Spring Boot, GUI development with JavaFX</p>
+    </li>
+    <li>
+        <strong>C/C++</strong>
+        <p>Linux kernel module re-implementing the 'top' command with condensed output information, a CPU cache simulator, and a CLI based photo editing program.</p>
+    </li>
+    <li>
+        <strong>Python</strong>
+        <p>Data scraping, munging, visualization, and analysis with Pandas, Numpy, MatPlotLib, and more. My research into internet misinformation spread is available on my
+        <a href="https://github.com/tmmosher">GitHub</a>.</p>
+    </li>
+    <li>
+        <strong>SolidJS</strong>
+        <p>A modern reactive web dashboard app leveraging SolidJS' extremely powerful and performant state management.</p>
+    </li>
+</ul>
+<p>You are connecting from: {{ adr }}</p>
 
 {% endblock %}

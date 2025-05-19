@@ -1,13 +1,12 @@
 use axum::{
-    routing::{get, post}, Router, extract::{Path, ConnectInfo, State},body::{Body}, response::{IntoResponse, Response, Redirect}, http::{ StatusCode}};
-use std::{
-    env,
-    sync::Arc,
-    net::SocketAddr
-};
+    body::Body, extract::{ConnectInfo, State}, http::StatusCode, response::{IntoResponse, Redirect, Response}, routing::get, Router};
 use lazy_static::lazy_static;
-use tokio::sync::RwLock;
+use std::{
+    net::SocketAddr,
+    sync::Arc
+};
 use tera::Tera;
+use tokio::sync::RwLock;
 
 lazy_static! {
     pub static ref TEMPLATES: Tera = {
@@ -59,15 +58,26 @@ async fn main() {
 }
 
 async fn root(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Response {
-    let context = tera::Context::new();
-    let cwd = env::current_dir().unwrap();
-    println!("Current working dir: {}", cwd.display());
-    let page = TEMPLATES.render("index.html", &context).unwrap();
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "text/html")
-        .body(Body::from(page))
-        .unwrap()
+    let mut context = tera::Context::new();
+    context.insert("adr", &addr.to_string());
+    let page = TEMPLATES.render("index.html", &context);
+    match page {
+        Ok(page) => {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "text/html")
+                .body(Body::from(page))
+                .unwrap()
+        }
+        Err(_e) => {
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header("Content-Type", "text/html")
+                .body(Body::from("<h1>Page not found.<h1>"))
+                .unwrap()
+        }
+    }
+
 }
 
 // async fn get_foo(State(state): State<Arc<AppState>>) -> Html<String> {
@@ -90,7 +100,7 @@ async fn root(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Response {
 //     format!("Hello, {}!", user_name.0)
 // }
 
-async fn users(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn users(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
     
 }
 
