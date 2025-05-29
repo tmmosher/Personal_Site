@@ -1,12 +1,14 @@
-use axum::{
-    body::Body, extract::{ConnectInfo, State}, http::StatusCode, response::{IntoResponse, Redirect, Response}, routing::get, Router};
+use axum::{body::Body, extract::{ConnectInfo, State, Path, rejection::JsonRejection}, http::StatusCode, response::{IntoResponse, Redirect, Response}, routing::get, Json, Router};
 use lazy_static::lazy_static;
+use serde::Serialize;
+use serde_json::{json, to_value, Value};
 use std::{
     net::SocketAddr,
     sync::Arc
 };
 use tera::Tera;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 lazy_static! {
     pub static ref TEMPLATES: Tera = {
@@ -24,13 +26,19 @@ lazy_static! {
     };
 }
 
+#[derive(Serialize)]
 struct User {
-    id: i32,
+    id: Uuid,
     username: String,
 }
 
+struct Pagination {
+    page: u32,
+    per_page: u32,
+}
+
 impl User {
-    fn new(id: i32, username: String) -> Self {
+    fn new(id: Uuid, username: String) -> Self {
         User { id, username }
     }
     
@@ -50,6 +58,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(root))
         .route("/users", get(users))
+        .route("/api/users", get(get_users).post(post_user))
         // .route("/users/add", post())
         .fallback(unknown_path)
         .with_state(shared_state);
@@ -71,7 +80,7 @@ async fn root(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Response {
         }
         Err(_e) => {
             Response::builder()
-                .status(StatusCode::NOT_FOUND)
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .header("Content-Type", "text/html")
                 .body(Body::from("<h1>Page not found.<h1>"))
                 .unwrap()
@@ -80,30 +89,118 @@ async fn root(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Response {
 
 }
 
-// async fn get_foo(State(state): State<Arc<AppState>>) -> Html<String> {
-//     let foo_status = state.foo_response.read().await;
-//     format!("<h1>Do you know what a foo is? {}</h1>", *foo_status).into()
-// }
-// 
-// async fn post_foo(State(state): State<Arc<AppState>>, Path(new_foo): Path<String>) -> Html<String>{
-//     let mut foo_status = state.foo_response.write().await;
-//     *foo_status = new_foo.clone();
-//     format!("<h1>New foo is {}!</h1>",  *foo_status).into()
-// }
-// 
-// async fn foo_bar_stranger() -> Html<String> {
-//     Html(String::from("Hello, stranger!"))
-// }
-// 
-// async fn foo_bar(path : Option<Path<String>>) -> impl IntoResponse {
-//     let user_name= path.unwrap();
-//     format!("Hello, {}!", user_name.0)
-// }
+async fn users(State(state): State<Arc<AppState>>) -> Response {
+    let mut context = tera::Context::new();
+    let users = state.user_list.read().await;
+    // turn user list into an iterator and collect cloned username and ID
+    // into a vector for display.
+    context.insert("users", &users.iter().map(|u| (u.username.clone(), u.id)).collect::<Vec<_>>());
+    let page = TEMPLATES.render("users.html", &context);
+    match page {
+        Ok(page) => {
+            Response::builder()
+                .header("Content-Type", "text/html")
+                .status(StatusCode::OK)
+                .body(Body::from(page))
+                .unwrap()
+        }
+        Err(_e) => {
+            Response::builder()
+                .header("Content-Type", "text/html")
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("<h1>Internal server error: Cannot display users.<h1>"))
+                .unwrap()
+        }
+    }
+}
 
-async fn users(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
-    
+/*
+    API endpoint to return users as a JSON list.
+ */
+async fn get_users(State(state): State<Arc<AppState>>) -> Response {
+    let users = state.user_list.read().await;
+    let body = match to_value(&*users) {
+        Ok(t) => t.to_string(),
+        Err(_e) => to_value("").unwrap().to_string()
+    };
+    Response::builder()
+        .header("Content-Type", "application/json")
+        .status(StatusCode::OK)
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn post_user(state: State<Arc<AppState>>, result: Result<Json<Value>, JsonRejection>) -> Response {
+    let user_status = match result {
+        Ok(Json(value)) => match value.get("username") {
+            // if the extractor passes and a username field exists, evaluates to a new user.
+            // do note, dear reader, that this doesn't do any pattern checking for a username.
+            // I should probably add size limits later, but for now this will suffice.
+            Some(name) => Ok(
+                User {
+                    id: Uuid::new_v4(),
+                    username: name.to_string(),
+                }
+            ),
+            None => Err((StatusCode::BAD_REQUEST, "JSON payload improperly structured".to_string())),
+        },
+        // more specific JSON error handling for response as per the axum::extract docs
+        Err(err) => match err {
+            JsonRejection::JsonSyntaxError(_) => Err((StatusCode::BAD_REQUEST, "JSON payload improperly structured".to_string())),
+            JsonRejection::BytesRejection(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to buffer request body".to_string())),
+            _ => Err((StatusCode::INTERNAL_SERVER_ERROR, "Unknown error".to_string())),
+        }
+    };
+    let new_user = match user_status {
+        Ok(user) => user,
+        Err((code, reason)) => {
+            return Response::builder()
+                .header("Content-Type", "text/plain")
+                .status(code)
+                .body(Body::from(reason))
+                .unwrap()
+        }
+    };
+    let mut users = state.user_list.write().await;
+    for user in users.iter() {
+        if user.username == new_user.username {
+            return Response::builder()
+                .header("Content-Type", "text/plain")
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from("User already exists."))
+                .unwrap()
+        }
+    }
+    let link =  format!("http://localhost:3000/api//user/{}", new_user.username);
+    users.push(new_user);
+    Response::builder()
+        .header("Content-Type", "text/plain")
+        .header("Location", link)
+        .status(StatusCode::CREATED)
+        .body(Body::default())
+        .unwrap()
 }
 
 async fn unknown_path() -> Redirect {
     Redirect::to("/")
 }
+
+// async fn get_foo(State(state): State<Arc<AppState>>) -> Html<String> {
+//     let foo_status = state.foo_response.read().await;
+//     format!("<h1>Do you know what a foo is? {}</h1>", *foo_status).into()
+// }
+//
+// async fn post_foo(State(state): State<Arc<AppState>>, Path(new_foo): Path<String>) -> Html<String>{
+//     let mut foo_status = state.foo_response.write().await;
+//     *foo_status = new_foo.clone();
+//     format!("<h1>New foo is {}!</h1>",  *foo_status).into()
+// }
+//
+// async fn foo_bar_stranger() -> Html<String> {
+//     Html(String::from("Hello, stranger!"))
+// }
+//
+// async fn foo_bar(path : Option<Path<String>>) -> impl IntoResponse {
+//     let user_name= path.unwrap();
+//     format!("Hello, {}!", user_name.0)
+// }

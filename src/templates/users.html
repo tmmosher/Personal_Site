@@ -1,0 +1,6 @@
+{% extends 'layout.html' %}
+{% block content %}
+<h2>Users</h2>
+{% for user in users %}
+    {{loop.index}}. {{user.0}}: {{user.1}}
+{% endblock %}
