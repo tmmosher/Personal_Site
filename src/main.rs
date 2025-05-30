@@ -38,8 +38,8 @@ struct Pagination {
 }
 
 impl User {
-    fn new(id: Uuid, username: String) -> Self {
-        User { id, username }
+    fn new(username: String) -> Self {
+        User { id: Uuid::new_v4(), username }
     }
     
     //during implementation, may have to change the user_list to mutable 
@@ -48,6 +48,7 @@ impl User {
     }
 }
 
+//TODO refactor user_list to a map rather than a vec
 struct AppState {
     user_list: RwLock<Vec<User>>
 }
@@ -94,6 +95,7 @@ async fn users(State(state): State<Arc<AppState>>) -> Response {
     let users = state.user_list.read().await;
     // turn user list into an iterator and collect cloned username and ID
     // into a vector for display.
+    //TODO pagination
     context.insert("users", &users.iter().map(|u| (u.username.clone(), u.id)).collect::<Vec<_>>());
     let page = TEMPLATES.render("users.html", &context);
     match page {
@@ -137,10 +139,7 @@ async fn post_user(state: State<Arc<AppState>>, result: Result<Json<Value>, Json
             // do note, dear reader, that this doesn't do any pattern checking for a username.
             // I should probably add size limits later, but for now this will suffice.
             Some(name) => Ok(
-                User {
-                    id: Uuid::new_v4(),
-                    username: name.to_string(),
-                }
+                User::new(name.to_string()) 
             ),
             None => Err((StatusCode::BAD_REQUEST, "JSON payload improperly structured".to_string())),
         },
@@ -151,6 +150,7 @@ async fn post_user(state: State<Arc<AppState>>, result: Result<Json<Value>, Json
             _ => Err((StatusCode::INTERNAL_SERVER_ERROR, "Unknown error".to_string())),
         }
     };
+    //unwraps the user 
     let new_user = match user_status {
         Ok(user) => user,
         Err((code, reason)) => {
@@ -162,6 +162,7 @@ async fn post_user(state: State<Arc<AppState>>, result: Result<Json<Value>, Json
         }
     };
     let mut users = state.user_list.write().await;
+    // crazy inefficient, will be refactored to a map
     for user in users.iter() {
         if user.username == new_user.username {
             return Response::builder()
@@ -171,7 +172,7 @@ async fn post_user(state: State<Arc<AppState>>, result: Result<Json<Value>, Json
                 .unwrap()
         }
     }
-    let link =  format!("http://localhost:3000/api//user/{}", new_user.username);
+    let link =  format!("http://localhost:3000/api/user/{}", new_user.username);
     users.push(new_user);
     Response::builder()
         .header("Content-Type", "text/plain")
