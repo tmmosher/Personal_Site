@@ -11,4 +11,5 @@ tera = "1.20.0"
 lazy_static = "1.5.0"
 serde = { version = "1.0.219", features = ["derive"]}
 serde_json = "1.0.140"
-uuid = { version = "1.17.0", features = ["v4", "serde"] }
+sqlite = "0.37.0"
+sqlx = { version="0.8.6", features = [""] }

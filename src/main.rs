@@ -9,7 +9,6 @@ use std::{
 };
 use tera::Tera;
 use tokio::sync::RwLock;
-use uuid::Uuid;
 
 lazy_static! {
     pub static ref TEMPLATES: Tera = {
@@ -29,7 +28,7 @@ lazy_static! {
 
 #[derive(Serialize)]
 struct User {
-    id: Uuid,
+    //id: Uuid,
     username: String,
 }
 
@@ -38,35 +37,46 @@ struct Pagination {
     per_page: u32,
 }
 
+// this abstraction for in-memory users is in the process of being replaced by a DB approach
 impl User {
-    fn new(username: String) -> Self {
-        User { id: Uuid::new_v4(), username }
-    }
+    // fn new(username: String) -> Self {
+    //     User { id: Uuid::new_v4(), username }
+    // }
     
     //just for text output of a user
     fn format(&self, to_add: &User, list: &mut Vec<String>) {
-        list.push(format!("   - ID: {} | Username: {}", to_add.id, to_add.username))
+        list.push(format!("   - Username: {}", to_add.username))
     }
 }
 
 struct AppState {
-    user_map: RwLock<HashMap<String, User>>
+    user_map: RwLock<HashMap<String, User>>,
+    
 }
 
 #[tokio::main]
 async fn main() {
-    let shared_state = Arc::new(AppState { user_map: RwLock::new(HashMap::new())});
+    let shared_state = bootstrap();
     let app = Router::new()
         .route("/", get(root))
         .route("/users", get(users))
         .route("/api/users", get(get_users).post(post_user))
-        // .route("/users/add", post())
         .fallback(unknown_path)
         .with_state(shared_state);
     let listener = tokio::net::TcpListener::bind("localhost:3000").await.unwrap();
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 }
 
+fn bootstrap() -> Arc<AppState>{
+    //TODO implement sqlx connection pooling with separate reader / writer connections. 
+    // let connection = //here;
+    let query = "
+    CREATE TABLE IF NOT EXISTS user_table (id INTEGER PRIMARY KEY, username TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS post_table (id INTEGER PRIMARY KEY, title TEXT NOT NULL, post TEXT NOT NULL);
+    ";
+    //TODO Placeholder to make compiler happy
+    Arc::new(AppState { user_map: RwLock::new(HashMap::new())})
+}
 async fn root(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Response {
     let mut context = tera::Context::new();
     context.insert("adr", &addr.to_string());
@@ -96,7 +106,7 @@ async fn users(State(state): State<Arc<AppState>>) -> Response {
     // turn user_map into an iterator of values and collect cloned username and ID
     // into a vector for rendering.
     //TODO pagination
-    context.insert("users", &users.values().map(|u| (u.username.clone(), u.id)).collect::<Vec<_>>());
+    context.insert("users", &users.values().map(|u| u.username.clone()).collect::<Vec<_>>());
     let page = TEMPLATES.render("users.html", &context);
     match page {
         Ok(page) => {
@@ -138,9 +148,7 @@ async fn post_user(state: State<Arc<AppState>>, result: Result<Json<Value>, Json
             // if the extractor passes and a username field exists, evaluates to a new user.
             // do note, dear reader, that this doesn't do any pattern checking for a username.
             // I should probably add size limits later, but for now this will suffice.
-            Some(name) => Ok(
-                User::new(name.to_string()) 
-            ),
+            Some(name) => Ok(User { username: name.to_string() }),
             None => Err((StatusCode::BAD_REQUEST, "JSON payload improperly structured".to_string())),
         },
         // more specific JSON error handling for response as per the axum::extract docs
