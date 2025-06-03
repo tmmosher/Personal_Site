@@ -171,7 +171,9 @@ async fn post_user(state: State<Arc<AppState>>, result: Result<Json<Value>, Json
                 .unwrap()
         },
         None => {
+            //TODO make the string a literal here? 'new_user.username' gets inserted surrounded by quotations..
             let link =  format!("http://localhost:3000/api/user/{}", new_user.username);
+            //TODO 'insert' could fail - add inner match case
             users.insert(new_user.username.clone(), new_user);
             Response::builder()
                 .header("Content-Type", "text/plain")
