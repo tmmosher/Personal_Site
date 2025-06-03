@@ -4,7 +4,8 @@ use serde::Serialize;
 use serde_json::{json, to_value, Value};
 use std::{
     net::SocketAddr,
-    sync::Arc
+    sync::Arc,
+    collections::HashMap,
 };
 use tera::Tera;
 use tokio::sync::RwLock;
@@ -42,20 +43,19 @@ impl User {
         User { id: Uuid::new_v4(), username }
     }
     
-    //during implementation, may have to change the user_list to mutable 
+    //just for text output of a user
     fn format(&self, to_add: &User, list: &mut Vec<String>) {
         list.push(format!("   - ID: {} | Username: {}", to_add.id, to_add.username))
     }
 }
 
-//TODO refactor user_list to a map rather than a vec
 struct AppState {
-    user_list: RwLock<Vec<User>>
+    user_map: RwLock<HashMap<String, User>>
 }
 
 #[tokio::main]
 async fn main() {
-    let shared_state = Arc::new(AppState { user_list: RwLock::new(Vec::with_capacity(10))});
+    let shared_state = Arc::new(AppState { user_map: RwLock::new(HashMap::new())});
     let app = Router::new()
         .route("/", get(root))
         .route("/users", get(users))
@@ -92,11 +92,11 @@ async fn root(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Response {
 
 async fn users(State(state): State<Arc<AppState>>) -> Response {
     let mut context = tera::Context::new();
-    let users = state.user_list.read().await;
-    // turn user list into an iterator and collect cloned username and ID
-    // into a vector for display.
+    let users = state.user_map.read().await;
+    // turn user_map into an iterator of values and collect cloned username and ID
+    // into a vector for rendering.
     //TODO pagination
-    context.insert("users", &users.iter().map(|u| (u.username.clone(), u.id)).collect::<Vec<_>>());
+    context.insert("users", &users.values().map(|u| (u.username.clone(), u.id)).collect::<Vec<_>>());
     let page = TEMPLATES.render("users.html", &context);
     match page {
         Ok(page) => {
@@ -120,7 +120,7 @@ async fn users(State(state): State<Arc<AppState>>) -> Response {
     API endpoint to return users as a JSON list.
  */
 async fn get_users(State(state): State<Arc<AppState>>) -> Response {
-    let users = state.user_list.read().await;
+    let users = state.user_map.read().await;
     let body = match to_value(&*users) {
         Ok(t) => t.to_string(),
         Err(_e) => to_value("").unwrap().to_string()
@@ -161,25 +161,27 @@ async fn post_user(state: State<Arc<AppState>>, result: Result<Json<Value>, Json
                 .unwrap()
         }
     };
-    let mut users = state.user_list.write().await;
-    // crazy inefficient, will be refactored to a map
-    for user in users.iter() {
-        if user.username == new_user.username {
-            return Response::builder()
+    let mut users = state.user_map.write().await;
+    let response = match users.get(&new_user.username) {
+        Some(_) => {
+            Response::builder()
                 .header("Content-Type", "text/plain")
                 .status(StatusCode::BAD_REQUEST)
                 .body(Body::from("User already exists."))
                 .unwrap()
+        },
+        None => {
+            let link =  format!("http://localhost:3000/api/user/{}", new_user.username);
+            users.insert(new_user.username.clone(), new_user);
+            Response::builder()
+                .header("Content-Type", "text/plain")
+                .header("Location", link)
+                .status(StatusCode::CREATED)
+                .body(Body::default())
+                .unwrap()
         }
-    }
-    let link =  format!("http://localhost:3000/api/user/{}", new_user.username);
-    users.push(new_user);
-    Response::builder()
-        .header("Content-Type", "text/plain")
-        .header("Location", link)
-        .status(StatusCode::CREATED)
-        .body(Body::default())
-        .unwrap()
+    };
+    response
 }
 
 async fn unknown_path() -> Redirect {
