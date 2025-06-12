@@ -1,17 +1,23 @@
-use axum::{body::Body, extract::{ConnectInfo, State, Path, rejection::JsonRejection}, http::{HeaderMap, HeaderValue, StatusCode}, response::{IntoResponse, Redirect, Response}, routing::get, Json, Router};
+use axum::http::header::{CONTENT_TYPE, LOCATION};
+use axum::{body::Body, extract::{rejection::JsonRejection, ConnectInfo, State}, http::{HeaderMap, HeaderValue, StatusCode}, response::{IntoResponse, Redirect}, routing::get, Json, Router};
+use chrono::prelude::*;
 use lazy_static::lazy_static;
-use serde::Serialize;
-use sqlx::{Pool, sqlite, sqlite::{SqliteConnectOptions, SqliteJournalMode}, Executor};
-use serde_json::{json, to_value, Value};
+use serde::{Serialize, Deserialize};
+use serde_json::{to_value, Value};
+use sqlx::{sqlite, sqlite::{SqliteConnectOptions, SqliteJournalMode}, Executor, Pool};
 use std::{
     net::SocketAddr,
     sync::Arc,
-    collections::HashMap,
 };
-use std::error::Error;
-use axum::http::header::{CONTENT_TYPE, LOCATION};
+use anyhow::{anyhow, Error};
+use axum::http::HeaderName;
+use axum::response::Response;
 use tera::Tera;
-use chrono::prelude::*;
+
+#[derive(Deserialize)]
+struct Config {
+    database_url: String,
+}
 
 lazy_static! {
     pub static ref TEMPLATES: Tera = {
@@ -29,29 +35,41 @@ lazy_static! {
     };
 }
 
+lazy_static! {
+    pub static ref database: String = {
+        match envy::from_env::<Config>() {
+            Ok(conf) => {
+                println!("Loaded env variables");
+                conf.database_url
+            }
+            Err(e) => {
+                eprintln!("Failed to parse env variables: {}", e);
+                ::std::process::exit(1);
+            }
+        }
+    };
+}
+
+//Role map:
+// 2: User
+// 1: Mod
+// 0: Admin
 #[derive(Serialize, Debug, sqlx::FromRow)]
 struct User {
     username: String,
     last_online: DateTime<Utc>,
     created: DateTime<Utc>,
-    role: Role
+    role: u32
 }
 
 impl User {
-    fn new(username: String, role: Role) -> Self {
+    fn new(username: String, role: u32) -> Self {
         User { username, last_online: Utc::now(), created: Utc::now(), role }
     }
 
-    fn set_role(&mut self, role: Role) {
+    fn set_role(&mut self, role: u32) {
         self.role = role;
     }
-}
-
-#[derive(Serialize, Debug)]
-enum Role {
-    ADMIN,
-    USER,
-    MOD
 }
 
 struct AppState {
@@ -76,18 +94,18 @@ async fn main() {
 
 async fn bootstrap() -> Arc<AppState>{
     let read_conn_opt: SqliteConnectOptions = SqliteConnectOptions::new()
-        .filename("uap.db")
+        .filename(database.as_str())
         .journal_mode(SqliteJournalMode::Wal)
         .read_only(true)
         .create_if_missing(true);
     let write_conn_opt: SqliteConnectOptions = SqliteConnectOptions::new()
-        .filename("uap.db")
+        .filename(database.as_str())
         .journal_mode(SqliteJournalMode::Wal)
         .create_if_missing(true);
     let read_conn: sqlite::SqlitePool = sqlite::SqlitePool::connect_lazy_with(read_conn_opt);
     let write_conn: sqlite::SqlitePool = sqlite::SqlitePool::connect_lazy_with(write_conn_opt);
     let query = "
-    CREATE TABLE IF NOT EXISTS user_table (id INTEGER PRIMARY KEY, username TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS user_table (id INTEGER PRIMARY KEY, username TEXT NOT NULL, last_online TEXT NOT NULL, created TEXT NOT NULL, role INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS post_table (id INTEGER PRIMARY KEY, title TEXT NOT NULL, post TEXT NOT NULL);
     ";
     write_conn.acquire().await.expect("Failed to acquire write connection in 'bootstrap()'")
@@ -116,8 +134,6 @@ async fn root(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> impl IntoResponse {
         }
     };
 }
-
-//TODO rip out old user system
 
 async fn users(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut context = tera::Context::new();
@@ -148,30 +164,93 @@ async fn users(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /*
     API endpoint to return users as a JSON list.
  */
-async fn get_users(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn get_users(state: State<Arc<AppState>>) -> impl IntoResponse {
     //TODO implement api 'users' endpoint for GET with db integration
-    let body = match to_value(&*users) {
-        Ok(t) => t.to_string(),
-        Err(_e) => "".to_string()
+    let body = match get_users_by_pagination(state).await {
+        Ok(t) => to_value(t),
+        Err(e) => to_value("")
     };
-    (
-        StatusCode::OK,
-        [("Content-Type", "application/json")],
-        Body::from(body)
-        )
+    match body {
+        Ok(body) => {
+            (
+                StatusCode::OK,
+                [("Content-Type", "application/json")],
+                Body::from(body.to_string())
+            )
+        }
+        Err(_) => {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [("Content-Type", "text/plain")],
+                Body::from("Internal server error")
+            )
+        }
+    }
+    
+}
+
+async fn get_users_by_pagination (state: State<Arc<AppState>>) -> Result<Vec<User>, sqlx::error::Error> {
+    sqlx::query_as("SELECT * FROM users ORDER BY last_online ASC LIMIT $1")
+        .bind(state.per_page)
+        .fetch_all(&state.read_pool)
+        .await
+}
+
+async fn post_user_body(state: State<Arc<AppState>>, result: Result<User, (StatusCode, String)>) 
+    -> Result<impl IntoResponse, anyhow::Error> {
+    //unwraps the user
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_str("text/plain")?);
+    let new_user = match result {
+        Ok(user) => user,
+        // Despite being an Err case, this is a valid response to return to the user.
+        Err((code, reason)) => {
+            return Ok((
+                    code,
+                    headers,
+                    Body::from(reason)
+                ))
+        }
+    };
+    match select_by_username(&new_user.username, &state).await {
+        Ok(_) => {
+            Ok((
+                StatusCode::BAD_REQUEST,
+                headers,
+                Body::from("User already exists.")
+            ))
+        },
+        Err(anyhow) => {
+            match anyhow.to_string().as_str() {
+                "No users found with this username." => {
+                    insert_user(&new_user, &state).await?;
+                    //TODO change from localhost:3000 when moving away from local testing
+                    //headers.insert("Location", HeaderValue::from_str(format!("https://tmmosher.com/user/{}", new_user.username).as_str())?);
+                    headers.insert("Location", HeaderValue::from_str(format!("https://localhost:3000/user/{}", new_user.username).as_str())?);
+                    Ok((
+                        StatusCode::CREATED,
+                        headers,
+                        Body::default()
+                    ))       
+                },
+                _ => {
+                    Err(anyhow!("Internal server error"))
+                }
+            }
+        }
+    }
 }
 
 async fn post_user(state: State<Arc<AppState>>, result: Result<Json<Value>, JsonRejection>)
-    -> Result<impl IntoResponse, anyhow::Error> {
-    //TODO a lot of explicit matching here. Definitely improved with use of 'anyhow' but could probably
-    // stand to be improved further.
+    -> Response {
     let user_status = match result {
         Ok(Json(value)) => match value.get("username") {
             // if the extractor passes and a username field exists, evaluates to a new user.
             // do note, dear reader, that this doesn't do any pattern checking for a username.
             // I should probably add size limits later, but for now this will suffice.
-            // For obvious security reasons only users can be created via the API.
-            Some(name) => Ok(User::new(name.to_string(), Role::USER)),
+            // For obvious security reasons only users (role lvl 2) can be created via the API.
+            Some(name) => Ok(User::new(name.to_string(), 2)),
+            // JSON format is valid but doesn't contain the required field 'username'
             None => Err((StatusCode::BAD_REQUEST, "JSON payload improperly structured".to_string())),
         },
         // more specific JSON error handling for response as per the axum::extract docs
@@ -181,50 +260,56 @@ async fn post_user(state: State<Arc<AppState>>, result: Result<Json<Value>, Json
             _ => Err((StatusCode::INTERNAL_SERVER_ERROR, "Unknown error".to_string())),
         }
     };
-    //unwraps the user
-    let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_str("text/plain")?);
-    let new_user = match user_status {
-        Ok(user) => user,
-        // Despite being an Err case, this is a valid response to return to the user.
-        Err((code, reason)) => {
-            return
-                Ok((
-                    code,
-                    headers,
-                    Body::from(reason)
-                ))
-        }
-    };
-    // TODO add DB user select
-    let response = match users.get(&new_user.username) {
-        Some(_) => {
-            (
-                StatusCode::BAD_REQUEST,
-                headers,
-                Body::from("User already exists.")
-            )
+    match post_user_body(state, user_status).await {
+        // matches all defined behavior, including 'bad' responses (BAD_REQUEST, bytes rejection, 
+        // improper JSON, etc.)
+        Ok(v) => {
+            v.into_response()
         },
-        None => {
-            //TODO add DB user addition
-            users.insert(new_user.username.clone(), new_user);
-            let location = format!("https://tmmosher.com/user/{}", new_user.username).as_str();
-            headers.insert(LOCATION, HeaderValue::from_str(location)?);
+        // matches all undefined behavior, essentially just server errors. 
+        Err(_) => {
             (
-                StatusCode::CREATED,
-                headers,
-                Body::default()
-            )
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [("Content-Type", "text/plain")],
+                Body::from("Internal server error")
+            ).into_response()
         }
-    };
-    Ok(response)
+    }
 }
 
 async fn select_by_username(username: &str,  state: &State<Arc<AppState>>) -> Result<User, anyhow::Error> {
-    let read_conn = state.read_pool.acquire().await?;
-    let p_stmnt = sqlx::query("SELECT 1 FROM users WHERE username = $1;");
-    //TODO temp for compiler to shut up
-    Ok(User::new(username.to_string(), Role::USER))
+    let read_conn = &state.read_pool;
+    let p_stmnt = sqlx::query_as("SELECT * FROM users WHERE username = $1 LIMIT 1")
+        .bind(username.to_string())
+        .fetch_optional(read_conn)
+        .await;
+    // manually unwrap p_stmnt for better error handling response
+    match p_stmnt {
+        Ok(v) => {
+            match v {
+                Some(v) => Ok(v),
+                None => Err(anyhow!("No users found with this username."))   
+            }
+        },
+        Err(_) => {
+            Err(anyhow!("Internal server error."))
+        }
+    }
+}
+
+async fn insert_user(user: &User, state: &State<Arc<AppState>>) -> Result<bool, anyhow::Error> {
+    let write_conn = &state.write_pool;
+    let insert_statement = sqlx::query("INSERT INTO users (username, last_online, created, role)
+        VALUES ($1, $2, $3, $4)")
+        .bind(user.username.clone())
+        .bind(user.last_online.to_string())
+        .bind(user.created.to_string())
+        .bind(user.role)
+        .execute(write_conn).await?;
+    match insert_statement.rows_affected() {
+        1 => Ok(true),
+        _ => Err(anyhow!("Unable to create user.")),
+    }
 }
 
 async fn unknown_path() -> Redirect {
