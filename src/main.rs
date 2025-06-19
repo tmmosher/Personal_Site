@@ -6,18 +6,13 @@ use serde::{Serialize, Deserialize};
 use serde_json::{to_value, Value};
 use sqlx::{sqlite, sqlite::{SqliteConnectOptions, SqliteJournalMode}, Executor, Pool};
 use std::{
+    env,
     net::SocketAddr,
     sync::Arc,
 };
 use anyhow::{anyhow, Error};
-use axum::http::HeaderName;
 use axum::response::Response;
 use tera::Tera;
-
-#[derive(Deserialize)]
-struct Config {
-    database_url: String,
-}
 
 lazy_static! {
     pub static ref TEMPLATES: Tera = {
@@ -29,21 +24,6 @@ lazy_static! {
             },
             Err(e) => {
                 println!("Parsing error(s) encountered: {}", e);
-                ::std::process::exit(1);
-            }
-        }
-    };
-}
-
-lazy_static! {
-    pub static ref database: String = {
-        match envy::from_env::<Config>() {
-            Ok(conf) => {
-                println!("Loaded env variables");
-                conf.database_url
-            }
-            Err(e) => {
-                eprintln!("Failed to parse env variables: {}", e);
                 ::std::process::exit(1);
             }
         }
@@ -92,14 +72,25 @@ async fn main() {
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.expect("Serving failed");
 }
 
-async fn bootstrap() -> Arc<AppState>{
+// as this is a startup function, this uses unsafe functions like expect().
+async fn bootstrap() -> Arc<AppState> {
+    let database = match dotenvy::dotenv() {
+        Ok(_buf) => {
+            println!("Loaded env variables!");
+            env::var("DATABASE_URL").expect("DATABASE_URL environment variable not found.")
+        }
+        Err(e) => {
+            eprintln!("Failed to parse env variables: {}", e);
+            ::std::process::exit(1);
+        }
+    };
     let read_conn_opt: SqliteConnectOptions = SqliteConnectOptions::new()
-        .filename(database.as_str())
+        .filename(&database)
         .journal_mode(SqliteJournalMode::Wal)
         .read_only(true)
         .create_if_missing(true);
     let write_conn_opt: SqliteConnectOptions = SqliteConnectOptions::new()
-        .filename(database.as_str())
+        .filename(&database)
         .journal_mode(SqliteJournalMode::Wal)
         .create_if_missing(true);
     let read_conn: sqlite::SqlitePool = sqlite::SqlitePool::connect_lazy_with(read_conn_opt);
@@ -112,7 +103,7 @@ async fn bootstrap() -> Arc<AppState>{
         .execute(query).await.expect("Failed to create user and post table in 'bootstrap()'");
     Arc::new(AppState { read_pool: read_conn, write_pool: write_conn, per_page: 32 })
 }
-async fn root(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> impl IntoResponse {
+async fn root(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Response {
     let mut context = tera::Context::new();
     context.insert("adr", &addr.to_string());
     let page = TEMPLATES.render("index.html", &context);
@@ -123,16 +114,16 @@ async fn root(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> impl IntoResponse {
                 StatusCode::OK,
                 [("Content-Type", "text/html")],
                 Body::from(page)
-            )
+            ).into_response()
         }
         Err(_e) => {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [("Content-Type", "text/html")],
                 Body::from("<h1>Internal server error. Please contact site administrator for help.<h1>")
-            )
+            ).into_response()
         }
-    };
+    }
 }
 
 async fn users(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -165,10 +156,9 @@ async fn users(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     API endpoint to return users as a JSON list.
  */
 async fn get_users(state: State<Arc<AppState>>) -> impl IntoResponse {
-    //TODO implement api 'users' endpoint for GET with db integration
     let body = match get_users_by_pagination(state).await {
         Ok(t) => to_value(t),
-        Err(e) => to_value("")
+        Err(_e) => to_value("")
     };
     match body {
         Ok(body) => {
@@ -186,9 +176,9 @@ async fn get_users(state: State<Arc<AppState>>) -> impl IntoResponse {
             )
         }
     }
-    
 }
 
+//TODO implement 'pagination' part of 'get_users_by_pagination'
 async fn get_users_by_pagination (state: State<Arc<AppState>>) -> Result<Vec<User>, sqlx::error::Error> {
     sqlx::query_as("SELECT * FROM users ORDER BY last_online ASC LIMIT $1")
         .bind(state.per_page)
@@ -196,7 +186,7 @@ async fn get_users_by_pagination (state: State<Arc<AppState>>) -> Result<Vec<Use
         .await
 }
 
-async fn post_user_body(state: State<Arc<AppState>>, result: Result<User, (StatusCode, String)>) 
+async fn post_user_body(state: State<Arc<AppState>>, result: Result<User, (StatusCode, String)>)
     -> Result<impl IntoResponse, anyhow::Error> {
     //unwraps the user
     let mut headers = HeaderMap::new();
@@ -231,7 +221,7 @@ async fn post_user_body(state: State<Arc<AppState>>, result: Result<User, (Statu
                         StatusCode::CREATED,
                         headers,
                         Body::default()
-                    ))       
+                    ))
                 },
                 _ => {
                     Err(anyhow!("Internal server error"))
@@ -261,12 +251,12 @@ async fn post_user(state: State<Arc<AppState>>, result: Result<Json<Value>, Json
         }
     };
     match post_user_body(state, user_status).await {
-        // matches all defined behavior, including 'bad' responses (BAD_REQUEST, bytes rejection, 
+        // matches all defined behavior, including 'bad' responses (BAD_REQUEST, bytes rejection,
         // improper JSON, etc.)
         Ok(v) => {
             v.into_response()
         },
-        // matches all undefined behavior, essentially just server errors. 
+        // matches all undefined behavior, essentially just server errors.
         Err(_) => {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -277,6 +267,7 @@ async fn post_user(state: State<Arc<AppState>>, result: Result<Json<Value>, Json
     }
 }
 
+//TODO refactor to an option rather than a result. Works as-is but code clarity suffers
 async fn select_by_username(username: &str,  state: &State<Arc<AppState>>) -> Result<User, anyhow::Error> {
     let read_conn = &state.read_pool;
     let p_stmnt = sqlx::query_as("SELECT * FROM users WHERE username = $1 LIMIT 1")
@@ -288,7 +279,7 @@ async fn select_by_username(username: &str,  state: &State<Arc<AppState>>) -> Re
         Ok(v) => {
             match v {
                 Some(v) => Ok(v),
-                None => Err(anyhow!("No users found with this username."))   
+                None => Err(anyhow!("No users found with this username."))
             }
         },
         Err(_) => {
