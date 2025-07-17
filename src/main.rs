@@ -129,10 +129,10 @@ mod server {
             }
         }
     }
-    
+
     async fn users_route(State(state): State<Arc<AppState>>) -> Response {
         let mut context = tera::Context::new();
-        if let Ok(users) = crate::server::get_users_by_pagination(state).await {
+        if let Ok(users) = get_users_by_pagination(state).await {
             context.insert("users", &users);
         } else {
             return (
@@ -165,7 +165,7 @@ mod server {
 
     ///    API endpoint to return users as a JSON list.
     async fn get_users(State(state): State<Arc<AppState>>) -> Response {
-        let body = match crate::server::get_users_by_pagination(state).await {
+        let body = match get_users_by_pagination(state).await {
             Ok(t) => to_value(t),
             Err(_e) => to_value("")
         };
@@ -186,7 +186,7 @@ mod server {
             }
         }
     }
-    
+
     //TODO implement 'pagination' part of 'get_users_by_pagination'
     async fn get_users_by_pagination(state: Arc<AppState>) -> Result<Vec<User>, sqlx::error::Error> {
         sqlx::query_as("SELECT * FROM user_table ORDER BY username ASC LIMIT $1")
