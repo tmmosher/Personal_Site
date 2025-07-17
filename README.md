@@ -1,0 +1,1 @@
+This is a personal website I occasionally host on AWS for fun. The code is extraordinarily simple and essentially serves as an extension of my resume. I plan to add more features to the REST API and add anonymous forum features.
