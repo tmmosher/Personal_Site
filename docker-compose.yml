@@ -5,4 +5,5 @@ services:
     ports:
      - "3000:3000"
     volumes:
-     - ~/dev/data:~/dev/Personal_Site/
+     - ./.env:/.env
+     - ./data:/data

@@ -24,10 +24,13 @@ COPY ./src ./src
 RUN rm ./target/release/deps/*
 RUN cargo build --release
 
-FROM debian:bullseye-slim as dev
+FROM debian:bookworm-slim as dev
 RUN apt-get update && apt-get install -y --no-install-recommends libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
+WORKDIR /Checkout_Server
+
 COPY --from=build /Checkout_Server/target/release/ .
+COPY .env .env
 
 CMD ["./Checkout_Webserver"]
