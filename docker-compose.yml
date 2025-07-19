@@ -1,4 +1,9 @@
-version: "3.8"
+networks:
+  container_network:
+    name: container_network
+  reverse_proxy:
+    external: true
+
 services:
   web:
     build: .
@@ -7,7 +12,6 @@ services:
     volumes:
      - ./.env:/.env
      - ./data:/data
-networks:
-  default:
-    name: nginx-proxy-manager
-    external: true
+    networks:
+      - container_network
+      - reverse_proxy
