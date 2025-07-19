@@ -7,3 +7,7 @@ services:
     volumes:
      - ./.env:/.env
      - ./data:/data
+networks:
+  default:
+    name: nginx-proxy-manager
+    external: true
