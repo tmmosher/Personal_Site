@@ -69,7 +69,7 @@ mod server {
             .fallback(unknown_path)
             .with_state(shared_state);
         // obviously if these fail the issue is irrecoverable, therefore 'expect' is reasonable to use.
-        let listener = tokio::net::TcpListener::bind("localhost:3000").await.expect("Bind failed");
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.expect("Bind failed");
         axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.expect("Serving failed");
     }
 

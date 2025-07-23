@@ -1,8 +1,6 @@
 networks:
   container_network:
     name: container_network
-  reverse_proxy:
-    external: true
 
 services:
   checkout_green:
@@ -14,4 +12,3 @@ services:
      - ./data:/data
     networks:
       - container_network
-      - reverse_proxy
