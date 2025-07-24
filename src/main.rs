@@ -86,6 +86,7 @@ mod server {
                 ::std::process::exit(1);
             }
         };
+        println!("Database URL: {}", database);
         let read_conn_opt: SqliteConnectOptions = SqliteConnectOptions::new()
             .filename(&database)
             .journal_mode(SqliteJournalMode::Wal)
@@ -122,6 +123,7 @@ mod server {
                 ).into_response()
             }
             Err(_e) => {
+                println!("Failed to create page: {}", _e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [("Content-Type", "text/html")],
