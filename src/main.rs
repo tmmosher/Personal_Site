@@ -91,6 +91,7 @@ mod server {
             .journal_mode(SqliteJournalMode::Wal)
             .read_only(true)
             .create_if_missing(true);
+        println!("Acquired read connection.");
         let write_conn_opt: SqliteConnectOptions = SqliteConnectOptions::new()
             .filename(&database)
             .journal_mode(SqliteJournalMode::Wal)
@@ -189,7 +190,7 @@ mod server {
 
     //TODO implement 'pagination' part of 'get_users_by_pagination'
     async fn get_users_by_pagination(state: Arc<AppState>) -> Result<Vec<User>, sqlx::error::Error> {
-        sqlx::query_as("SELECT * FROM user_table ORDER BY username ASC LIMIT $1")
+        sqlx::query_as("SELECT username FROM user_table ORDER BY username ASC LIMIT $1")
             .bind(state.per_page)
             .fetch_all(&state.read_pool)
             .await
@@ -227,8 +228,8 @@ mod server {
                     "No users found with this username." => {
                         insert_user(&new_user, &state).await?;
                         //change between localhost:3000 and production domain for local testing and vice versa.
-                        headers.insert("Location", HeaderValue::from_str(format!("https://tmmosher.com/user/{}", new_user.username).as_str())?);
-                        //headers.insert("Location", HeaderValue::from_str(format!("https://localhost:3000/user/{}", new_user.username).as_str())?);
+                        headers.insert(LOCATION, HeaderValue::from_str(format!("https://tmmosher.com/user/{}", new_user.username).as_str())?);
+                        //headers.insert(LOCATION, HeaderValue::from_str(format!("http://localhost:3000/user/{}", new_user.username).as_str())?);
                         Ok((
                             StatusCode::CREATED,
                             headers,
@@ -275,12 +276,13 @@ mod server {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [("Content-Type", "text/plain")],
-                    Body::from("Internal server error")
+                    Body::from("Internal server error. Contact site administrator for assistance.")
                 ).into_response()
             }
         }
     }
-
+// rationally it makes more sense to return an option here rather than a result. 
+    // TODO possible refactor target from result to option
     async fn select_by_username(username: &str, state: &State<Arc<AppState>>) -> Result<User, anyhow::Error> {
         let read_conn = &state.read_pool;
         let p_stmnt = sqlx::query_as("SELECT * FROM user_table WHERE username = $1 LIMIT 1")

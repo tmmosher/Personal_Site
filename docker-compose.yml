@@ -8,7 +8,6 @@ services:
     ports:
      - "3000:3000"
     volumes:
-     - ./.env:/.env
-     - ./data:/data
+     - ./data:/Checkout_Server/data:rw
     networks:
       - container_network
