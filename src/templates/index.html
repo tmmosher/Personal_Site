@@ -1,4 +1,5 @@
 {% extends 'layout.html' %}
+{% import "macros.html" as macros %}
 {% block title %}Home{% endblock title %}
 {% block content %}
 
@@ -46,8 +47,8 @@
         <p>A modern reactive web dashboard app leveraging SolidJS' extremely powerful and performant state management.</p>
     </li>
 </ul>
-<a href="https://tmmosher.com/users">Check out a list of users!</a>
+{% set user_location = ROOT ~ "users" %}
+{{ macros::generate_link(location=user_location, text="Check out a list of users!") }}
 <hr/>
-<p>You are connecting from: {{ adr }}</p>
 
 {% endblock %}

@@ -1,9 +1,13 @@
+// TODO break out functions into modules
 mod server {
+    use anyhow::anyhow;
     use axum::http::header::{CONTENT_TYPE, LOCATION};
+    use axum::response::Response;
     use axum::{body::Body, extract::{rejection::JsonRejection, ConnectInfo, State}, http::{HeaderMap, HeaderValue, StatusCode}, response::{IntoResponse, Redirect}, routing::get, Json, Router};
-    use chrono::prelude::*;
+    use chrono::Utc;
     use lazy_static::lazy_static;
-    use serde::Serialize;
+    use regex::Regex;
+    use serde::{Deserializer, Serialize};
     use serde_json::{to_value, Value};
     use sqlx::{sqlite, sqlite::{SqliteConnectOptions, SqliteJournalMode}, Executor, Pool};
     use std::{
@@ -11,10 +15,9 @@ mod server {
         net::SocketAddr,
         sync::Arc,
     };
-    use anyhow::anyhow;
-    use axum::response::Response;
     use tera::Tera;
 
+    // Page templating 
     lazy_static! {
         pub static ref TEMPLATES: Tera = {
             let source = "src/templates/**/*.html";
@@ -31,21 +34,37 @@ mod server {
         };
     }
 
+    // constants
+    const ROOT: &str = "http://localhost:3000/";
+    
     //Role map:
     // 2: User
     // 1: Mod
     // 0: Admin
+    // role map is not used in database as sqlite doesn't like enums. 
+    // May refactor for User display function later
+    enum Role {
+        USER,
+        MOD,
+        ADMIN
+    }
+    
     #[derive(Serialize, Debug, sqlx::FromRow)]
     struct User {
-        username: String,
-        last_online: DateTime<Utc>,
-        created: DateTime<Utc>,
+        // size of values will not change while in-memory, no need for String
+        username: Box<str>,
+        last_online: Box<str>, 
+        created: Box<str>,
         role: u32
     }
 
     impl User {
-        fn new(username: String, role: u32) -> Self {
-            User { username, last_online: Utc::now(), created: Utc::now(), role }
+        fn new(username: Box<str>, role: u32) -> Self {
+            User { 
+                username, 
+                last_online: Box::from(Utc::now().to_rfc3339()), 
+                created: Box::from(Utc::now().to_rfc3339()), 
+                role }
         }
 
         fn set_role(&mut self, role: u32) {
@@ -92,11 +111,11 @@ mod server {
             .journal_mode(SqliteJournalMode::Wal)
             .read_only(true)
             .create_if_missing(true);
-        println!("Acquired read connection.");
         let write_conn_opt: SqliteConnectOptions = SqliteConnectOptions::new()
             .filename(&database)
             .journal_mode(SqliteJournalMode::Wal)
             .create_if_missing(true);
+        println!("Acquired read connection.");
         let read_conn: sqlite::SqlitePool = sqlite::SqlitePool::connect_lazy_with(read_conn_opt);
         let write_conn: sqlite::SqlitePool = sqlite::SqlitePool::connect_lazy_with(write_conn_opt);
         let query = "
@@ -109,9 +128,9 @@ mod server {
     }
 
     /// Home page
-    async fn root(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Response {
+    async fn root() -> Response {
         let mut context = tera::Context::new();
-        context.insert("adr", &addr.to_string());
+        context.insert("ROOT", ROOT);
         let page = TEMPLATES.render("index.html", &context);
         match page {
             // return a tuple parsable to an axum::Response
@@ -123,7 +142,7 @@ mod server {
                 ).into_response()
             }
             Err(_e) => {
-                println!("Failed to create page: {}", _e);
+                println!("Failed to create page: {:?}", _e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [("Content-Type", "text/html")],
@@ -146,6 +165,7 @@ mod server {
         }
         //TODO pagination
         context.insert("page_no", &1);
+        context.insert("ROOT", ROOT);
         let page = TEMPLATES.render("users.html", &context);
         match page {
             //return a tuple parsable to an axum::response to satisfy return impl
@@ -157,10 +177,11 @@ mod server {
                 ).into_response()
             }
             Err(_e) => {
+                println!("Failed to render page: {:?}", _e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [("Content-Type", "text/html")],
-                    Body::from("<h1>Internal server error: Cannot display users.<h1>")
+                    Body::from("<h1>Internal server error: Cannot display page.<h1>")
                 ).into_response()
             }
         }
@@ -170,7 +191,7 @@ mod server {
     async fn get_users(State(state): State<Arc<AppState>>) -> Response {
         let body = match get_users_by_pagination(state).await {
             Ok(t) => to_value(t),
-            Err(_e) => to_value("")
+            Err(_e) => to_value(format!("{}", _e))
         };
         match body {
             Ok(body) => {
@@ -191,8 +212,9 @@ mod server {
     }
 
     //TODO implement 'pagination' part of 'get_users_by_pagination'
+    /// Retrieves a vector of User structs comprised of the first n=state.per_page users.
     async fn get_users_by_pagination(state: Arc<AppState>) -> Result<Vec<User>, sqlx::error::Error> {
-        sqlx::query_as("SELECT username FROM user_table ORDER BY username ASC LIMIT $1")
+        sqlx::query_as("SELECT * FROM user_table ORDER BY username LIMIT $1")
             .bind(state.per_page)
             .fetch_all(&state.read_pool)
             .await
@@ -217,7 +239,10 @@ mod server {
                 ))
             }
         };
+        //TODO this inverted logic here is pretty bad. Once Result -> Option refactor is complete for
+        // select_by_username this will be refactored to be much clearer
         match select_by_username(&new_user.username, &state).await {
+            // if select_by_username found something, then it's a duplicate name and must be rejected
             Ok(_) => {
                 Ok((
                     StatusCode::BAD_REQUEST,
@@ -225,13 +250,12 @@ mod server {
                     Body::from("User already exists.")
                 ))
             },
+            // 
             Err(anyhow) => {
                 match anyhow.to_string().as_str() {
                     "No users found with this username." => {
                         insert_user(&new_user, &state).await?;
-                        //change between localhost:3000 and production domain for local testing and vice versa.
-                        headers.insert(LOCATION, HeaderValue::from_str(format!("https://tmmosher.com/user/{}", new_user.username).as_str())?);
-                        //headers.insert(LOCATION, HeaderValue::from_str(format!("http://localhost:3000/user/{}", new_user.username).as_str())?);
+                        headers.insert(LOCATION, HeaderValue::from_str(format!("{ROOT}/user/{}", new_user.username).as_str())?);
                         Ok((
                             StatusCode::CREATED,
                             headers,
@@ -251,19 +275,16 @@ mod server {
                        -> Response {
         // unwraps user information from the POST body
         let user_status = match result {
-            Ok(Json(value)) => match value.get("username") {
-                // if the extractor passes and a username field exists, evaluates to a new user.
-                // do note, dear reader, that this doesn't do any pattern checking for a username.
-                // I should definitely add size mins/maxes later, but for now this will suffice.
-                // For obvious security reasons only users (role lvl 2) can be created via the API.
-                Some(name) => Ok(User::new(name.to_string(), 2)),
-                // JSON format is valid but doesn't contain the required field 'username'
-                None => Err((StatusCode::BAD_REQUEST, "JSON payload improperly structured".to_string())),
+            Ok(Json(json_map)) => {
+                let res = json_map.get("username");
+                username_check(res)
             },
             // more specific JSON error handling for response as per the axum::extract docs
             Err(err) => match err {
-                JsonRejection::JsonSyntaxError(_) => Err((StatusCode::BAD_REQUEST, "JSON payload improperly structured".to_string())),
-                JsonRejection::BytesRejection(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to buffer request body".to_string())),
+                JsonRejection::JsonSyntaxError(_) => Err((StatusCode::BAD_REQUEST, "Invalid JSON syntax.".to_string())),
+                JsonRejection::JsonDataError(_) => Err((StatusCode::BAD_REQUEST, "Given JSON data structure does not match expected parsed result.".to_string())),
+                JsonRejection::MissingJsonContentType(_) =>  Err((StatusCode::BAD_REQUEST, "Missing JSON content type in request header.".to_string())),
+                JsonRejection::BytesRejection(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to buffer request body.".to_string())),
                 _ => Err((StatusCode::INTERNAL_SERVER_ERROR, "Unknown error".to_string())),
             }
         };
@@ -283,15 +304,34 @@ mod server {
             }
         }
     }
-// rationally it makes more sense to return an option here rather than a result. 
-    // TODO possible refactor target from result to option
+
+    /// Validates username contains no special characters (underscores permitted) and is at least 5 letters/numbers long.
+    /// Must include at least one letter.
+    fn username_check(json_value: Option<&Value>) -> Result<User, (StatusCode, String)> {
+        // if the extractor passes and a username field exists + is valid, evaluates to a new user.
+        // For obvious security reasons only users (role lvl 2) can be created via the API.
+        json_value.and_then(|username_json| username_json.as_str())
+            .and_then(|name| {
+                // rust's regex engine doesn't support look-aheads for some reason, so this checks
+                // for at least 5 alphanumeric values, with at least one of them being strictly alphabetic
+                if Regex::new(r"^[_a-zA-Z0-9]{5,32}$").is_ok_and(|val| val.is_match(name)) 
+                    && name.chars().any(|c| c.is_alphabetic()){
+                     Some(User::new(Box::from(name), 2))
+                } else {
+                    None
+                }
+            })
+            .ok_or((StatusCode::BAD_REQUEST, "JSON payload structure invalid.".to_string()))
+    }
+
+    // TODO refactor target from result to option
     async fn select_by_username(username: &str, state: &State<Arc<AppState>>) -> Result<User, anyhow::Error> {
         let read_conn = &state.read_pool;
         let p_stmnt = sqlx::query_as("SELECT * FROM user_table WHERE username = $1 LIMIT 1")
-            .bind(username.to_string())
+            .bind(username)
             .fetch_optional(read_conn)
             .await;
-        // nested unwrap of p_stmnt for better error handling response
+        // TODO turn this into a functional unwrap rather than match statement
         match p_stmnt {
             Ok(v) => {
                 match v {
@@ -313,7 +353,7 @@ mod server {
         let write_conn = &state.write_pool;
         let insert_statement = sqlx::query("INSERT INTO user_table (username, last_online, created, role)
         VALUES ($1, $2, $3, $4)")
-            .bind(user.username.clone())
+            .bind(&*user.username.to_string())
             .bind(user.last_online.to_string())
             .bind(user.created.to_string())
             .bind(user.role)
@@ -326,6 +366,62 @@ mod server {
 
     async fn unknown_path() -> Redirect {
         Redirect::to("/")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use assertables::{assert_err, assert_ok};
+        #[test]
+        fn test_valid_user_api_post_value() {
+            let json = to_value("Water_Bottle".to_string()).unwrap();
+            let result = username_check(Some(&json));
+            assert_ok!(result);
+            let json = to_value("Water_Bottle123".to_string()).unwrap();
+            let result = username_check(Some(&json));
+            assert_ok!(result);
+            let json = to_value("123Water_Bottle".to_string()).unwrap();
+            let result = username_check(Some(&json));
+            assert_ok!(result);
+            let json = to_value("1234f".to_string()).unwrap();
+            let result = username_check(Some(&json));
+            assert_ok!(result);
+        }
+        #[test]
+        fn test_invalid_user_api_post_type() {
+            let json = to_value(true).unwrap();
+            let result = username_check(Some(&json));
+            assert_err!(result);
+            let json = to_value(1).unwrap();
+            let result = username_check(Some(&json));
+            assert_err!(result);
+            let json = to_value([1, 5]).unwrap();
+            let result = username_check(Some(&json));
+            assert_err!(result);
+            let json = to_value(["test", "test_string_vec"]).unwrap();
+            let result = username_check(Some(&json));
+            assert_err!(result);
+        }
+
+        #[test]
+        fn test_invalid_user_api_post_name() {
+            let json = to_value("  f".to_string()).unwrap();
+            let result = username_check(Some(&json));
+            assert_err!(result);
+            let json = to_value("f  ".to_string()).unwrap();
+            let result = username_check(Some(&json));
+            assert_err!(result);
+            let json = to_value("   ".to_string()).unwrap();
+            let result = username_check(Some(&json));
+            assert_err!(result);
+            let json = to_value("DELETE * FROM user_table WHERE 1=1;".to_string()).unwrap();
+            let result = username_check(Some(&json));
+            assert_err!(result);
+            let json = to_value("1234".to_string()).unwrap();
+            let result = username_check(Some(&json));
+            assert_err!(result);
+        }
+        
     }
 }
 fn main() {

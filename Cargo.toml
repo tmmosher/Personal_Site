@@ -15,3 +15,5 @@ sqlx = { version="0.8.6", features = ["macros", "chrono", "sqlite", "runtime-tok
 chrono = { version="0.4.41", features=["serde"]}
 anyhow = "1.0.98"
 dotenvy = "0.15.7"
+assertables = "9.8.1"
+regex = "1.11.1"

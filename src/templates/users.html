@@ -1,10 +1,11 @@
 {% extends 'layout.html' %}
+{% import "macros.html" as macros %}
 {% block title %}Home{% endblock title %}
 {% block content %}
 <h2>Users</h2>
 {% for user in users %}
-    <p>{{loop.index}}. {{user.0}}: {{user.1}}</p>
+    <p>{{loop.index}}. {{user.username}}</p>
 {% endfor %}
 <p>Page {{ page_no }}</p>
-<a href="https://tmmosher.com/">Home</a>
+{{ macros::generate_link(location="{{ROOT}}", text="Home") }}
 {% endblock %}
