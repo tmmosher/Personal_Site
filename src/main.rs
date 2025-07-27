@@ -1,6 +1,6 @@
 // TODO break out functions into modules
 mod server {
-    use anyhow::anyhow;
+    use anyhow::{anyhow, Error};
     use axum::http::header::{CONTENT_TYPE, LOCATION};
     use axum::response::Response;
     use axum::{body::Body, extract::{rejection::JsonRejection, ConnectInfo, State}, http::{HeaderMap, HeaderValue, StatusCode}, response::{IntoResponse, Redirect}, routing::get, Json, Router};
@@ -17,7 +17,7 @@ mod server {
     };
     use tera::Tera;
 
-    // Page templating 
+    // Page templating
     lazy_static! {
         pub static ref TEMPLATES: Tera = {
             let source = "src/templates/**/*.html";
@@ -36,35 +36,36 @@ mod server {
 
     // constants
     const ROOT: &str = "http://localhost:3000/";
-    
+
     //Role map:
     // 2: User
     // 1: Mod
     // 0: Admin
-    // role map is not used in database as sqlite doesn't like enums. 
+    // role map is not used in database as sqlite doesn't like enums.
     // May refactor for User display function later
     enum Role {
         USER,
         MOD,
         ADMIN
     }
-    
+
     #[derive(Serialize, Debug, sqlx::FromRow)]
     struct User {
-        // size of values will not change while in-memory, no need for String
+        // size of values will not change while in-memory, ergo String type safely replaced by Box<str>
         username: Box<str>,
-        last_online: Box<str>, 
+        last_online: Box<str>,
         created: Box<str>,
         role: u32
     }
 
     impl User {
         fn new(username: Box<str>, role: u32) -> Self {
-            User { 
-                username, 
-                last_online: Box::from(Utc::now().to_rfc3339()), 
-                created: Box::from(Utc::now().to_rfc3339()), 
-                role }
+            User {
+                username,
+                last_online: Box::from(Utc::now().to_rfc3339()),
+                created: Box::from(Utc::now().to_rfc3339()),
+                role
+            }
         }
 
         fn set_role(&mut self, role: u32) {
@@ -83,7 +84,8 @@ mod server {
         let shared_state = bootstrap().await;
         let app = Router::new()
             .route("/", get(root))
-            .route("/users", get(users_route))
+            .route("/users", get(users_list_route))
+            .route("/user/{}", get())
             .route("/api/users", get(get_users).post(post_user))
             .fallback(unknown_path)
             .with_state(shared_state);
@@ -152,8 +154,10 @@ mod server {
         }
     }
 
-    async fn users_route(State(state): State<Arc<AppState>>) -> Response {
+    async fn users_list_route(State(state): State<Arc<AppState>>) -> Response {
         let mut context = tera::Context::new();
+        context.insert("page_no", &1);
+        context.insert("ROOT", ROOT);
         if let Ok(users) = get_users_by_pagination(state).await {
             context.insert("users", &users);
         } else {
@@ -164,8 +168,6 @@ mod server {
             ).into_response()
         }
         //TODO pagination
-        context.insert("page_no", &1);
-        context.insert("ROOT", ROOT);
         let page = TEMPLATES.render("users.html", &context);
         match page {
             //return a tuple parsable to an axum::response to satisfy return impl
@@ -177,7 +179,6 @@ mod server {
                 ).into_response()
             }
             Err(_e) => {
-                println!("Failed to render page: {:?}", _e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [("Content-Type", "text/html")],
@@ -185,6 +186,15 @@ mod server {
                 ).into_response()
             }
         }
+    }
+
+    // TODO implementation
+    async fn get_user_route(State(state): State<Arc<AppState>>) -> Response {
+        (
+            StatusCode::OK,
+            [("Content-Type", "text/html")],
+            Body::from("Hello! Under construction..")
+        ).into_response()
     }
 
     ///    API endpoint to return users as a JSON list.
@@ -211,61 +221,51 @@ mod server {
         }
     }
 
-    //TODO implement 'pagination' part of 'get_users_by_pagination'
-    /// Retrieves a vector of User structs comprised of the first n=state.per_page users.
-    async fn get_users_by_pagination(state: Arc<AppState>) -> Result<Vec<User>, sqlx::error::Error> {
-        sqlx::query_as("SELECT * FROM user_table ORDER BY username LIMIT $1")
-            .bind(state.per_page)
-            .fetch_all(&state.read_pool)
-            .await
-    }
-
-    /// Handles detailed account creation and database access. Returns either a response ready to be sent
-    /// or an error to fn 'post_user'.
-    async fn post_user_body(state: State<Arc<AppState>>, result: Result<User, (StatusCode, String)>)
+    /// Handles detailed account creation and database access. Returns either a valid/invalid
+    /// response ready to be sent back to client or a server error to fn 'post_user'.
+    async fn post_user_body(state: State<Arc<AppState>>, add_user_status: Result<User, (StatusCode, String)>)
                             -> Result<impl IntoResponse, anyhow::Error> {
-        //HeaderMap is more readable here, as responses get ugly when using a list of tuples
-        // for multiple headers.
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_str("text/plain")?);
-        let new_user = match result {
-            Ok(user) => user,
-            //Despite being an Err case, this is a valid response to bubble up to fn post_user
+        match add_user_status {
+            // 'add_user_status' match block determines if we are going
+            // to add a new user OR return to fn 'post_user' based on if 'add_user_status'
+            // indicates the user data is structurally valid.
+            Ok(user) => match select_by_username(&user.username, &state).await {
+                // inner match block to determine if database has Some User associated with the
+                // given username.
+                None => {
+                    // user is not a duplicate, can be created
+                    insert_user(&user, &state).await?;
+                    headers.insert(LOCATION, HeaderValue::from_str(format!("{ROOT}/user/{}", user.username).as_str())?);
+                    Ok((
+                        StatusCode::CREATED,
+                        headers,
+                        Body::default()
+                    ))
+                },
+                Some(matching_user_or_error) => {
+                    // either the database found a matching user or returned an error
+                    match matching_user_or_error {
+                        Ok(_v) => {
+                            Ok((
+                                StatusCode::BAD_REQUEST,
+                                headers,
+                                Body::from("User already exists.")
+                            ))
+                        },
+                        Err(_e) => Err(anyhow!("Unable to determine user status."))
+                    }
+                }
+            },
+            //Despite being an Err case, this is a valid response to bubble up to fn 'post_user' for
+            // it to build as a non-server error response.
             Err((code, reason)) => {
-                return Ok((
+                Ok((
                     code,
                     headers,
                     Body::from(reason)
                 ))
-            }
-        };
-        //TODO this inverted logic here is pretty bad. Once Result -> Option refactor is complete for
-        // select_by_username this will be refactored to be much clearer
-        match select_by_username(&new_user.username, &state).await {
-            // if select_by_username found something, then it's a duplicate name and must be rejected
-            Ok(_) => {
-                Ok((
-                    StatusCode::BAD_REQUEST,
-                    headers,
-                    Body::from("User already exists.")
-                ))
-            },
-            // 
-            Err(anyhow) => {
-                match anyhow.to_string().as_str() {
-                    "No users found with this username." => {
-                        insert_user(&new_user, &state).await?;
-                        headers.insert(LOCATION, HeaderValue::from_str(format!("{ROOT}/user/{}", new_user.username).as_str())?);
-                        Ok((
-                            StatusCode::CREATED,
-                            headers,
-                            Body::default()
-                        ))
-                    },
-                    _ => {
-                        Err(anyhow!("Internal server error"))
-                    }
-                }
             }
         }
     }
@@ -273,10 +273,11 @@ mod server {
     /// POST request handler for account creation.
     async fn post_user(state: State<Arc<AppState>>, result: Result<Json<Value>, JsonRejection>)
                        -> Response {
-        // unwraps user information from the POST body
+        // extracts user information from the POST body
         let user_status = match result {
             Ok(Json(json_map)) => {
                 let res = json_map.get("username");
+                // make sure content is valid
                 username_check(res)
             },
             // more specific JSON error handling for response as per the axum::extract docs
@@ -288,21 +289,14 @@ mod server {
                 _ => Err((StatusCode::INTERNAL_SERVER_ERROR, "Unknown error".to_string())),
             }
         };
-        match post_user_body(state, user_status).await {
-            // matches all expected behavior including good and bad responses (bad request, bytes rejection,
-            // improper JSON, etc.)
-            Ok(v) => {
-                v.into_response()
-            },
-            // matches all uncaught behavior. This should not be encountered often (ideally ever).
-            Err(_) => {
+        post_user_body(state, user_status).await.map_or_else(|_e| {
+            // error condition, could provide more details but I would need to sanitize first.
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [("Content-Type", "text/plain")],
                     Body::from("Internal server error. Contact site administrator for assistance.")
                 ).into_response()
-            }
-        }
+            }, |v| v.into_response())
     }
 
     /// Validates username contains no special characters (underscores permitted) and is at least 5 letters/numbers long.
@@ -314,7 +308,7 @@ mod server {
             .and_then(|name| {
                 // rust's regex engine doesn't support look-aheads for some reason, so this checks
                 // for at least 5 alphanumeric values, with at least one of them being strictly alphabetic
-                if Regex::new(r"^[_a-zA-Z0-9]{5,32}$").is_ok_and(|val| val.is_match(name)) 
+                if Regex::new(r"^[_a-zA-Z0-9]{5,32}$").is_ok_and(|val| val.is_match(name))
                     && name.chars().any(|c| c.is_alphabetic()){
                      Some(User::new(Box::from(name), 2))
                 } else {
@@ -324,31 +318,22 @@ mod server {
             .ok_or((StatusCode::BAD_REQUEST, "JSON payload structure invalid.".to_string()))
     }
 
-    // TODO refactor target from result to option
-    async fn select_by_username(username: &str, state: &State<Arc<AppState>>) -> Result<User, anyhow::Error> {
+    /// Find a given user in the database by username
+    async fn select_by_username(username: &str, state: &State<Arc<AppState>>) -> Option<Result<User, anyhow::Error>> {
         let read_conn = &state.read_pool;
-        let p_stmnt = sqlx::query_as("SELECT * FROM user_table WHERE username = $1 LIMIT 1")
+        sqlx::query_as("SELECT * FROM user_table WHERE username = $1 LIMIT 1")
             .bind(username)
             .fetch_optional(read_conn)
-            .await;
-        // TODO turn this into a functional unwrap rather than match statement
-        match p_stmnt {
-            Ok(v) => {
-                match v {
-                    Some(v) => Ok(v),
-                    None => Err(anyhow!("No users found with this username."))
-                }
-            },
-            Err(_) => {
-                Err(anyhow!("Internal server error."))
-            }
-        }
+            .await
+            // branch depending on error status of query. If db has an issue, we have SOME ERRor to
+            // return. If we have SOME OK value, we return that too. If method 'and_then' fails in the
+            // success branch of 'map_or_else', we implicitly return None. This is a bit clearer
+            // than the nested matches in my opinion and allows for a switch to an Optional Result.
+            .map_or_else(|error| Some(Err(anyhow!("Internal server error: {error}."))),
+                            |row| row.map(Ok))
     }
 
-    /// Inserts a user from memory into persistent storage.
-    /* Result is used rather than Option for unpacking with the '?'
-        operator to help code readability during the query. Furthermore, Axum **really** doesn't like
-        returning Options, but it seems to be happy with Results.*/
+    /// Inserts a user into persistent storage.
     async fn insert_user(user: &User, state: &State<Arc<AppState>>) -> Result<bool, anyhow::Error> {
         let write_conn = &state.write_pool;
         let insert_statement = sqlx::query("INSERT INTO user_table (username, last_online, created, role)
@@ -362,6 +347,15 @@ mod server {
             1 => Ok(true),
             _ => Err(anyhow!("Unable to create user.")),
         }
+    }
+
+    //TODO implement 'pagination' part of 'get_users_by_pagination'
+    /// Retrieves a vector of User structs comprised of the first n=state.per_page users.
+    async fn get_users_by_pagination(state: Arc<AppState>) -> Result<Vec<User>, sqlx::error::Error> {
+        sqlx::query_as("SELECT * FROM user_table ORDER BY username LIMIT $1")
+            .bind(state.per_page)
+            .fetch_all(&state.read_pool)
+            .await
     }
 
     async fn unknown_path() -> Redirect {
