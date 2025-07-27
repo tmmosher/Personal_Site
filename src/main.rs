@@ -35,7 +35,7 @@ mod server {
     }
 
     // constants
-    const ROOT: &str = "https://tmmosher:3000/";
+    const ROOT: &str = "https://tmmosher.com/";
 
     //Role map:
     // 2: User
