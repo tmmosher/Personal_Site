@@ -35,7 +35,7 @@ mod server {
     }
 
     // constants
-    const ROOT: &str = "http://localhost:3000/";
+    const ROOT: &str = "https://tmmosher:3000/";
 
     //Role map:
     // 2: User
@@ -85,7 +85,7 @@ mod server {
         let app = Router::new()
             .route("/", get(root))
             .route("/users", get(users_list_route))
-            .route("/user/{}", get(get_user_route))
+            .route("/user/{name}", get(get_user_route))
             .route("/api/users", get(get_users).post(post_user))
             .fallback(unknown_path)
             .with_state(shared_state);
