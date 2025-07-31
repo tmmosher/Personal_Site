@@ -15,6 +15,9 @@ WORKDIR /Checkout_Server
 COPY ./Cargo.lock ./Cargo.lock
 COPY ./Cargo.toml ./Cargo.toml
 COPY ./.env ./.env
+COPY ./.sqlx ./.sqlx
+
+ENV SQLX_OFFLINE=true
 
 RUN cargo build --release
 RUN rm src/*.rs

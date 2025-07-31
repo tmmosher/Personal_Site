@@ -9,6 +9,6 @@ services:
      - "3000:3000"
     volumes:
      - ./data:/Checkout_Server/data:rw
-     - ./src/templates:/Checkout_Server/src/templates:r
+     - ./src/templates:/Checkout_Server/src/templates:rw
     networks:
       - container_network

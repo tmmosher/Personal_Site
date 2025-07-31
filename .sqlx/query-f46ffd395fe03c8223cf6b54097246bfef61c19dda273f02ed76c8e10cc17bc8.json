@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_table (username, last_online, created, role)\n        VALUES ($1, $2, $3, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "f46ffd395fe03c8223cf6b54097246bfef61c19dda273f02ed76c8e10cc17bc8"
+}

@@ -3,11 +3,11 @@ mod server {
     use anyhow::{anyhow, Error};
     use axum::http::header::{CONTENT_TYPE, LOCATION};
     use axum::response::Response;
-    use axum::{body::Body, extract::{rejection::JsonRejection, ConnectInfo, State}, http::{HeaderMap, HeaderValue, StatusCode}, response::{IntoResponse, Redirect}, routing::get, Json, Router};
+    use axum::{body::Body, extract::{rejection::JsonRejection, State}, http::{HeaderMap, HeaderValue, StatusCode}, response::{IntoResponse, Redirect}, routing::get, Json, Router};
     use chrono::Utc;
     use lazy_static::lazy_static;
     use regex::Regex;
-    use serde::{Deserializer, Serialize};
+    use serde::{Serialize};
     use serde_json::{to_value, Value};
     use sqlx::{sqlite, sqlite::{SqliteConnectOptions, SqliteJournalMode}, Executor, Pool};
     use std::{
@@ -28,14 +28,15 @@ mod server {
                 },
                 Err(e) => {
                     println!("Parsing error(s) encountered: {}", e);
-                    ::std::process::exit(1);
+                    std::process::exit(1);
                 }
             }
         };
     }
 
-    // constants
-    const ROOT: &str = "https://tmmosher.com/";
+    // constant(s)
+    // change this one prn for use in local development 
+    const ROOT: &str = "http://0.0.0.0:3000/";
 
     //Role map:
     // 2: User
@@ -44,27 +45,39 @@ mod server {
     // role map is not used in database as sqlite doesn't like enums.
     // May refactor for User display function later
     enum Role {
-        USER,
-        MOD,
-        ADMIN
+        User,
+        Mod,
+        Admin
     }
 
     #[derive(Serialize, Debug, sqlx::FromRow)]
     struct User {
-        // size of values will not change while in-memory, ergo String type safely replaced by Box<str>
-        username: Box<str>,
-        last_online: Box<str>,
-        created: Box<str>,
+        // size of values will not change while in-memory, so a Box serves better than a String here
+        username: String,
+        last_online: String,
+        created: String,
         role: u32
     }
 
     impl User {
-        fn new(username: Box<str>, role: u32) -> Self {
+        fn new(username: String, role: u32) -> Self {
             User {
                 username,
-                last_online: Box::from(Utc::now().to_rfc3339()),
-                created: Box::from(Utc::now().to_rfc3339()),
+                last_online: Utc::now().to_rfc3339(),
+                created: Utc::now().to_rfc3339(),
                 role
+            }
+        }
+        
+        fn create_from_db(username: String, last_online: String, created: String, role: i64) -> Self {
+            User {
+                username,
+                last_online,
+                created,
+                role: role as u32 // 'role' should only ever follow the role map above, and users 
+                // don't get to access the 'role' field directly ever. Therefore, I'm confident this
+                // explicit casting will never enter an invalid state. If I end up doing anything more
+                // complex with user roles, this function should be refactored to return an Option<Self, Error>.
             }
         }
 
@@ -104,20 +117,19 @@ mod server {
             }
             Err(e) => {
                 eprintln!("Failed to parse env variables: {}", e);
-                ::std::process::exit(1);
+                std::process::exit(1);
             }
         };
         println!("Database URL: {}", database);
-        let read_conn_opt: SqliteConnectOptions = SqliteConnectOptions::new()
-            .filename(&database)
-            .journal_mode(SqliteJournalMode::Wal)
-            .read_only(true)
-            .create_if_missing(true);
         let write_conn_opt: SqliteConnectOptions = SqliteConnectOptions::new()
             .filename(&database)
             .journal_mode(SqliteJournalMode::Wal)
             .create_if_missing(true);
-        println!("Acquired read connection.");
+        let read_conn_opt: SqliteConnectOptions = SqliteConnectOptions::new()
+            .filename(&database)
+            .journal_mode(SqliteJournalMode::Wal)
+            .create_if_missing(true)
+            .read_only(true);
         let read_conn: sqlite::SqlitePool = sqlite::SqlitePool::connect_lazy_with(read_conn_opt);
         let write_conn: sqlite::SqlitePool = sqlite::SqlitePool::connect_lazy_with(write_conn_opt);
         let query = "
@@ -126,6 +138,7 @@ mod server {
     ";
         write_conn.acquire().await.expect("Failed to acquire write connection in 'bootstrap()'")
             .execute(query).await.expect("Failed to create user and post table in 'bootstrap()'");
+        println!("Acquired / created DB file");
         Arc::new(AppState { read_pool: read_conn, write_pool: write_conn, per_page: 32 })
     }
 
@@ -158,7 +171,7 @@ mod server {
         let mut context = tera::Context::new();
         context.insert("page_no", &1);
         context.insert("ROOT", ROOT);
-        if let Ok(users) = get_users_by_pagination(state).await {
+        if let Ok(users) = get_username_by_pagination(state).await {
             context.insert("users", &users);
         } else {
             return (
@@ -189,7 +202,7 @@ mod server {
     }
 
     // TODO implementation
-    async fn get_user_route(State(state): State<Arc<AppState>>) -> Response {
+    async fn get_user_route(State(_state): State<Arc<AppState>>) -> Response {
         (
             StatusCode::OK,
             [("Content-Type", "text/html")],
@@ -199,7 +212,7 @@ mod server {
 
     ///    API endpoint to return users as a JSON list.
     async fn get_users(State(state): State<Arc<AppState>>) -> Response {
-        let body = match get_users_by_pagination(state).await {
+        let body = match get_username_by_pagination(state).await {
             Ok(t) => to_value(t),
             Err(_e) => to_value(format!("{}", _e))
         };
@@ -224,7 +237,7 @@ mod server {
     /// Handles detailed account creation and database access. Returns either a valid/invalid
     /// response ready to be sent back to client or a server error to fn 'post_user'.
     async fn post_user_body(state: State<Arc<AppState>>, add_user_status: Result<User, (StatusCode, String)>)
-                            -> Result<impl IntoResponse, anyhow::Error> {
+                            -> Result<impl IntoResponse, Error> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_str("text/plain")?);
         match add_user_status {
@@ -251,7 +264,7 @@ mod server {
                             Ok((
                                 StatusCode::BAD_REQUEST,
                                 headers,
-                                Body::from("User already exists.")
+                                Body::from(format!("User with name '{}' already exists.", _v.username))
                             ))
                         },
                         Err(_e) => Err(anyhow!("Unable to determine user status."))
@@ -306,11 +319,11 @@ mod server {
         // For obvious security reasons only users (role lvl 2) can be created via the API.
         json_value.and_then(|username_json| username_json.as_str())
             .and_then(|name| {
-                // rust's regex engine doesn't support look-aheads for some reason, so this checks
-                // for at least 5 alphanumeric values, with at least one of them being strictly alphabetic
+                // rust's regex engine doesn't support look-ahead for some reason, so this checks
+                // for at least 5 and up to 32 alphanumeric values, with at least one of them being strictly alphabetic
                 if Regex::new(r"^[_a-zA-Z0-9]{5,32}$").is_ok_and(|val| val.is_match(name))
-                    && name.chars().any(|c| c.is_alphabetic()){
-                     Some(User::new(Box::from(name), 2))
+                    && name.chars().any(|c| c.is_alphabetic()) {
+                     Some(User::new(name.to_string(), 2))
                 } else {
                     None
                 }
@@ -318,30 +331,32 @@ mod server {
             .ok_or((StatusCode::BAD_REQUEST, "JSON payload structure invalid.".to_string()))
     }
 
-    /// Find a given user in the database by username
-    async fn select_by_username(username: &str, state: &State<Arc<AppState>>) -> Option<Result<User, anyhow::Error>> {
+    /// Find a given User in the database by username
+    async fn select_by_username(username: &str, state: &State<Arc<AppState>>) -> Option<Result<User, Error>> {
         let read_conn = &state.read_pool;
-        sqlx::query_as("SELECT * FROM user_table WHERE username = $1 LIMIT 1")
-            .bind(username)
+        sqlx::query!(r#"SELECT * FROM user_table WHERE username = $1 LIMIT 1"#, username)
             .fetch_optional(read_conn)
             .await
             // branch depending on error status of query. If db has an issue, we have SOME ERRor to
-            // return. If we have SOME OK value, we return that too. If method 'and_then' fails in the
-            // success branch of 'map_or_else', we implicitly return None. This is a bit clearer
-            // than the nested matches in my opinion and allows for a switch to an Optional Result.
-            .map_or_else(|error| Some(Err(anyhow!("Internal server error: {error}."))),
-                            |row| row.map(Ok))
+            // return or we have SOME OK value.
+            .map_or_else(|error| Some(Err(anyhow!("Internal server error: {error}."))), // error case
+                            |row| row.map(|content| // success case
+                                Ok(User::create_from_db(content.username,
+                                                        content.last_online,
+                                                        content.created,
+                                                        content.role))))
     }
 
     /// Inserts a user into persistent storage.
-    async fn insert_user(user: &User, state: &State<Arc<AppState>>) -> Result<bool, anyhow::Error> {
+    async fn insert_user(user: &User, state: &State<Arc<AppState>>) -> Result<bool, Error> {
         let write_conn = &state.write_pool;
-        let insert_statement = sqlx::query("INSERT INTO user_table (username, last_online, created, role)
-        VALUES ($1, $2, $3, $4)")
-            .bind(&*user.username.to_string())
-            .bind(user.last_online.to_string())
-            .bind(user.created.to_string())
-            .bind(user.role)
+        
+        let insert_statement = sqlx::query!("INSERT INTO user_table (username, last_online, created, role)
+        VALUES ($1, $2, $3, $4)", 
+            user.username, 
+            user.last_online, 
+            user.created, 
+            user.role)
             .execute(write_conn).await?;
         match insert_statement.rows_affected() {
             1 => Ok(true),
@@ -350,14 +365,35 @@ mod server {
     }
 
     //TODO implement 'pagination' part of 'get_users_by_pagination'
-    /// Retrieves a vector of User structs comprised of the first n=state.per_page users.
-    async fn get_users_by_pagination(state: Arc<AppState>) -> Result<Vec<User>, sqlx::error::Error> {
-        sqlx::query_as("SELECT * FROM user_table ORDER BY username LIMIT $1")
-            .bind(state.per_page)
+    /// Retrieves a vector of usernames comprised of the first n=state.per_page users.
+    async fn get_username_by_pagination(state: Arc<AppState>) -> Result<Vec<String>, Error>{
+        sqlx::query!("SELECT username FROM user_table ORDER BY username LIMIT $1", state.per_page)
             .fetch_all(&state.read_pool)
             .await
+            .map_or_else(|error| Err(anyhow!("Internal server error: {error}.")),
+            |record_vec| Ok(record_vec.into_iter()
+                .map(|item| item.username)
+                .collect()))
     }
-
+    
+    /// Returns a vector of User structs comprised of the first n=state.per_page users.
+    /// # Arguments
+    /// * `state`: Shared app state across threads
+    /// returns: Result<Vec<User, Global>, Error>
+    async fn get_users_by_pagination(state: Arc<AppState>) -> Result<Vec<User>, Error> {
+        sqlx::query!("SELECT username, last_online, created, role FROM user_table ORDER BY username LIMIT $1", state.per_page)
+            .fetch_all(&state.read_pool)
+            .await
+            .map_or_else(|err| Err(anyhow!("Internal server error: {err}.")),
+            |record_vec| Ok(record_vec.into_iter()
+                .map(|element| {
+                    User::create_from_db(element.username, 
+                                         element.last_online, 
+                                         element.created, 
+                                         element.role) }
+                ).collect()))
+    }
+    
     async fn unknown_path() -> Redirect {
         Redirect::to("/")
     }

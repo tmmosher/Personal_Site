@@ -4,7 +4,7 @@
 {% block content %}
 <h2>Users</h2>
 {% for user in users %}
-    <p>{{loop.index}}. {{user.username}}</p>
+    <p>{{loop.index}}. {{user}}</p>
 {% endfor %}
 <p>Page {{ page_no }}</p>
 {{ macros::generate_link(location="{{ROOT}}", text="Home") }}
